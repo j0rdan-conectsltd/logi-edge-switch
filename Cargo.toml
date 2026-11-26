@@ -1,0 +1,22 @@
+[package]
+name = "logi-edge-switch"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+hidapi = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+eframe = "0.31"
+display-info = "0.5"
+device_query = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_System_Console"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.24"
+
+[profile.release]
+opt-level = 3
+strip = true

@@ -1,0 +1,10 @@
+{
+  "rules": [
+    { "edge": "right", "channel": 2 }
+  ],
+  "devices": [],
+  "dwell_ms": 150,
+  "corner_margin_px": 40,
+  "cooldown_s": 2.0,
+  "ignore_while_dragging": true
+}

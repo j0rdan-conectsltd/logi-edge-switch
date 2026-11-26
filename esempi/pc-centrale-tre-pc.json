@@ -1,0 +1,9 @@
+{
+  "rules": [
+    { "edge": "left",  "channel": 1, "peer": "192.168.1.10:50555" },
+    { "edge": "right", "channel": 3, "peer": "192.168.1.30:50555",
+      "device_channels": { "MX Keys": 2 } }
+  ],
+  "listen_port": 50555,
+  "token": "cambia-questa-parola"
+}
