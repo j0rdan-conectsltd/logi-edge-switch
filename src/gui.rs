@@ -80,7 +80,13 @@ impl App {
                     Some(3) => None,
                     Some(c) => Some(c + 1),
                 };
-                cfg.set_rule("", Some(&key), next);
+                let own_left = self.monitors.iter().filter(|o| o.key() != key && cfg.monitor_rule(&o.key()).is_none()).count();
+                if next.is_some() && cfg.monitor_rule(&key).is_none() && own_left == 0 {
+                    // altrimenti il cursore sarebbe sempre in un monitor condiviso: cambi di canale a ripetizione
+                    self.status = "Almeno un monitor deve restare a questo PC: usa i bordi per passare all'altro PC.".into();
+                } else {
+                    cfg.set_rule("", Some(&key), next);
+                }
             }
         }
 

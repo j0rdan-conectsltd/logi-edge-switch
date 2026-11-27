@@ -26,6 +26,22 @@ impl Rect {
     }
 }
 
+/// Su macOS usa direttamente CoreGraphics: display-info passa da NSScreen, che va
+/// usato solo dal thread principale, mentre il loop lo richiama da un altro thread (crash).
+#[cfg(target_os = "macos")]
+pub fn get_monitors() -> Vec<Rect> {
+    use core_graphics::display::CGDisplay;
+    CGDisplay::active_displays()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|id| {
+            let b = CGDisplay::new(id).bounds();
+            Rect { x: b.origin.x as i32, y: b.origin.y as i32, w: b.size.width as i32, h: b.size.height as i32 }
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "macos"))]
 pub fn get_monitors() -> Vec<Rect> {
     display_info::DisplayInfo::all()
         .unwrap_or_default()
@@ -171,6 +187,8 @@ pub fn spawn(sh: Arc<Shared>) {
         let mut cooldown_until = Instant::now();
         let mut armed = true;
         let mut last_own: Option<(i32, i32)> = None;
+        let mut mon_armed = true;
+        let mut warned_all_shared = false;
 
         loop {
             if !sh.running.load(Ordering::Relaxed) {
@@ -196,10 +214,25 @@ pub fn spawn(sh: Arc<Shared>) {
             let pressed = mouse.button_pressed.iter().any(|&b| b);
             let dragging = cfg.ignore_while_dragging && pressed;
 
-            // Monitor condiviso con l'altro PC: entrarci = passare all'altro PC
+            // Monitor condiviso con l'altro PC: entrarci = passare all'altro PC.
+            // Se tutti i monitor sono marcati condivisi la regola è un errore di
+            // configurazione (il cursore sarebbe sempre "dentro"): la si ignora.
+            let own: Vec<Rect> = monitors.iter().copied().filter(|m| cfg.monitor_rule(&m.key()).is_none()).collect();
+            if own.is_empty() && !monitors.is_empty() {
+                if !warned_all_shared {
+                    sh.log("[!] tutti i monitor sono marcati come condivisi: regole dei monitor ignorate. Clicca il monitor per riportarlo a \"Questo PC\".");
+                    warned_all_shared = true;
+                }
+            } else {
+                warned_all_shared = false;
+            }
             let cur = monitors.iter().find(|m| m.contains(px, py));
-            if let Some(rule) = cur.and_then(|m| cfg.monitor_rule(&m.key())) {
-                if now >= cooldown_until && !dragging {
+            let shared_rule = if own.is_empty() { None } else { cur.and_then(|m| cfg.monitor_rule(&m.key())) };
+            if let Some(rule) = shared_rule {
+                // mon_armed: dopo un cambio il cursore deve tornare su un monitor di
+                // questo PC prima di poter scattare di nuovo (niente cambi a ripetizione).
+                if mon_armed && now >= cooldown_until && !dragging {
+                    mon_armed = false;
                     if let Some((x, y)) = last_own {
                         set_cursor(x, y); // al rientro il cursore non deve essere lì dentro
                     }
@@ -212,8 +245,8 @@ pub fn spawn(sh: Arc<Shared>) {
                 continue;
             }
             last_own = Some((px, py));
+            mon_armed = true;
 
-            let own: Vec<Rect> = monitors.iter().copied().filter(|m| cfg.monitor_rule(&m.key()).is_none()).collect();
             let Some(edge) = outer_edge_hit(&own, px, py, cfg.corner_margin_px) else {
                 edge_since = None;
                 armed = true;

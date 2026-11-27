@@ -4,7 +4,8 @@
 
 use hidapi::{HidApi, HidDevice};
 use std::ffi::CString;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{mpsc, Mutex, OnceLock};
+use std::thread;
 use std::time::{Duration, Instant};
 
 const LOGITECH_VID: u16 = 0x046D;
@@ -40,14 +41,43 @@ impl std::fmt::Display for LogiDevice {
     }
 }
 
-/// Un solo HidApi per processo; serializza anche scan e switch concorrenti.
-fn api() -> Result<std::sync::MutexGuard<'static, HidApi>, String> {
-    static API: OnceLock<Result<Mutex<HidApi>, String>> = OnceLock::new();
-    let m = API
-        .get_or_init(|| HidApi::new().map(Mutex::new).map_err(|e| e.to_string()))
-        .as_ref()
-        .map_err(|e| format!("hidapi: {e}"))?;
-    Ok(m.lock().unwrap_or_else(|p| p.into_inner()))
+type Job = Box<dyn FnOnce(&mut HidApi) + Send>;
+
+/// Esegue `f` sull'unico thread HID del processo, che possiede l'HidApi.
+/// Su macOS hidapi registra il gestore HID sul run loop del thread che lo crea:
+/// se quel thread termina, lo scan successivo da un altro thread crasha
+/// (CFRunLoopAddSource su un run loop distrutto). Un thread fisso evita il problema
+/// e serializza anche scan e switch concorrenti.
+fn with_api<R: Send + 'static>(f: impl FnOnce(&mut HidApi) -> Result<R, String> + Send + 'static) -> Result<R, String> {
+    static TX: OnceLock<Mutex<mpsc::Sender<Job>>> = OnceLock::new();
+    let tx = TX.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<Job>();
+        thread::Builder::new()
+            .name("hid".into())
+            .spawn(move || {
+                let mut api = HidApi::new().map_err(|e| format!("hidapi: {e}"));
+                // macOS apre i dispositivi in esclusiva per default: per le tastiere
+                // fallisce con "privilege violation" (e per il mouse ne sequestra l'input).
+                #[cfg(target_os = "macos")]
+                if let Ok(api) = &api {
+                    api.set_open_exclusive(false);
+                }
+                for job in rx {
+                    match &mut api {
+                        Ok(api) => job(api),
+                        Err(_) => drop(job), // il chiamante riceve l'errore dal canale chiuso
+                    }
+                }
+            })
+            .expect("avvio thread HID");
+        Mutex::new(tx)
+    });
+    let (rtx, rrx) = mpsc::channel();
+    let job: Job = Box::new(move |api| {
+        let _ = rtx.send(f(api));
+    });
+    tx.lock().unwrap_or_else(|p| p.into_inner()).send(job).map_err(|_| "thread HID terminato".to_string())?;
+    rrx.recv().unwrap_or_else(|_| Err("hidapi non disponibile".into()))
 }
 
 struct Channel(HidDevice);
@@ -117,7 +147,10 @@ fn open(api: &HidApi, path: &CString) -> Result<Channel, String> {
 
 /// Trova tutte le periferiche Logitech connesse che supportano Easy-Switch.
 pub fn discover() -> Result<Vec<LogiDevice>, String> {
-    let mut api = api()?;
+    with_api(discover_with)
+}
+
+fn discover_with(api: &mut HidApi) -> Result<Vec<LogiDevice>, String> {
     api.refresh_devices().map_err(|e| e.to_string())?;
     let mut paths: Vec<(CString, u16)> = Vec::new();
     for info in api.device_list() {
@@ -137,11 +170,11 @@ pub fn discover() -> Result<Vec<LogiDevice>, String> {
         // shortcut: Bolt risponde in ~0.5 s, ogni slot vuoto costa 1 s; se troppo lento,
         // leggere l'errore 0x8F dalla collezione 0xFF00/0x0001.
         let (indices, timeout): (Vec<u8>, _) = if usage_page == 0xFF43 {
-            (vec![DEVICE_INDEX_DIRECT], Duration::from_millis(600))
+            (vec![DEVICE_INDEX_DIRECT], Duration::from_millis(1500)) // una tastiera BLE in standby può metterci ~0.8 s
         } else {
             ((1..=6).collect(), Duration::from_secs(1))
         };
-        let Ok(ch) = open(&api, &path) else { continue };
+        let Ok(ch) = open(api, &path) else { continue };
         for idx in indices {
             let probe = || -> Result<Option<LogiDevice>, String> {
                 let feat = ch.feature_index(idx, FEATURE_CHANGE_HOST, timeout)?;
@@ -166,9 +199,11 @@ pub fn switch_device(dev: &LogiDevice, channel: u8) -> Result<(), String> {
     if channel == 0 || channel > dev.num_hosts {
         return Err(format!("{}: canale {channel} non valido (1..{})", dev.name, dev.num_hosts));
     }
-    let api = api()?;
-    let ch = open(&api, &dev.path)?;
-    // Il dispositivo si disconnette subito: nessuna risposta.
-    ch.request(dev.device_index, dev.change_host_index, 0x01, &[channel - 1], Duration::ZERO, false)?;
-    Ok(())
+    let dev = dev.clone();
+    with_api(move |api| {
+        let ch = open(api, &dev.path)?;
+        // Il dispositivo si disconnette subito: nessuna risposta.
+        ch.request(dev.device_index, dev.change_host_index, 0x01, &[channel - 1], Duration::ZERO, false)?;
+        Ok(())
+    })
 }
