@@ -82,19 +82,5 @@ fn main() {
     sh.rescan_async();
     engine::spawn(sh.clone());
 
-    let opts = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([720.0, 680.0]),
-        ..Default::default()
-    };
-    let start = flag("--start");
-    let app = Box::new(move |cc: &eframe::CreationContext| {
-        if start {
-            cc.egui_ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Minimized(true));
-        }
-        Ok(Box::new(gui::App::new(sh, cfg_path)) as Box<dyn eframe::App>)
-    });
-    if let Err(e) = eframe::run_native("Logi Edge Switch", opts, app) {
-        eprintln!("Errore interfaccia: {e}");
-    }
+    gui::run(sh, cfg_path, flag("--start"));
 }

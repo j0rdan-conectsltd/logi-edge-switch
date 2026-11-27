@@ -7,7 +7,7 @@ edition = "2021"
 hidapi = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-eframe = "0.31"
+rune = { git = "https://github.com/anomalyco/rune", rev = "048528dc35f0a7499887f334330fd9704cdd8e51" }
 device_query = "2"
 
 [target.'cfg(windows)'.dependencies]
@@ -22,3 +22,14 @@ core-graphics = "0.24"
 [profile.release]
 opt-level = 3
 strip = true
+
+# Rune richiede le sue versioni patchate, allo stesso rev della dipendenza.
+[patch.crates-io]
+winit = { git = "https://github.com/anomalyco/rune", rev = "048528dc35f0a7499887f334330fd9704cdd8e51" }
+sctk-adwaita = { git = "https://github.com/anomalyco/rune", rev = "048528dc35f0a7499887f334330fd9704cdd8e51" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "048528dc35f0a7499887f334330fd9704cdd8e51" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "048528dc35f0a7499887f334330fd9704cdd8e51" }
+naga = { git = "https://github.com/anomalyco/rune", rev = "048528dc35f0a7499887f334330fd9704cdd8e51" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "048528dc35f0a7499887f334330fd9704cdd8e51" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "048528dc35f0a7499887f334330fd9704cdd8e51" }
+accesskit_atspi_common = { git = "https://github.com/anomalyco/rune", rev = "048528dc35f0a7499887f334330fd9704cdd8e51" }

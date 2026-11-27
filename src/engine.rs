@@ -5,7 +5,7 @@ use crate::config::{Config, Rule};
 use crate::hidpp::{self, LogiDevice};
 use device_query::{DeviceQuery, DeviceState};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -71,6 +71,70 @@ pub fn outer_edge_hit(monitors: &[Rect], px: i32, py: i32, margin: i32) -> Optio
     }
 }
 
+/// Bordo esterno entro `dist` px dal cursore: (bordo, distanza, punto del bordo davanti al cursore).
+pub fn near_edge(monitors: &[Rect], px: i32, py: i32, margin: i32, dist: i32) -> Option<(&'static str, i32, (i32, i32))> {
+    let m = monitors.iter().find(|m| m.contains(px, py))?;
+    let (r, b) = (m.x + m.w - 1, m.y + m.h - 1);
+    [("left", px - m.x, (m.x, py)), ("right", r - px, (r, py)), ("top", py - m.y, (px, m.y)), ("bottom", b - py, (px, b))]
+        .into_iter()
+        .filter(|&(e, d, (x, y))| d <= dist && outer_edge_hit(monitors, x, y, margin) == Some(e))
+        .min_by_key(|&(_, d, _)| d)
+}
+
+/// Bagliore da disegnare: punto del bordo (px desktop), bordo, intensità 0..1.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Glow {
+    pub x: i32,
+    pub y: i32,
+    pub edge: &'static str,
+    pub level: f32,
+}
+
+/// Riceve il bagliore dal loop (`None` = spegni); false = non ancora mostrabile, riprova. Impostato dalla GUI.
+pub type GlowSink = Box<dyn Fn(Option<Glow>) -> bool + Send + Sync>;
+
+/// Resistenza durante l'attesa sul bordo: lo spostamento verso l'interno è frenato
+/// (il cursore fa 1/4 della strada); oltre `limit` px di spinta si rilascia e si annulla.
+#[derive(Debug)]
+struct Hold {
+    edge: &'static str,
+    edge_n: i32,
+    set: (i32, i32),
+    intent: i32,
+}
+
+impl Hold {
+    fn new(edge: &'static str, px: i32, py: i32) -> Self {
+        let edge_n = if matches!(edge, "left" | "right") { px } else { py };
+        Self { edge, edge_n, set: (px, py), intent: 0 }
+    }
+
+    /// Nuova posizione del cursore, o `None` se l'utente ha tirato oltre `limit`.
+    fn pull(&mut self, px: i32, py: i32, limit: i32) -> Option<(i32, i32)> {
+        let vertical = matches!(self.edge, "left" | "right");
+        let dir = if matches!(self.edge, "left" | "top") { 1 } else { -1 };
+        let (n, set_n) = if vertical { (px, self.set.0) } else { (py, self.set.1) };
+        self.intent = (self.intent + (n - set_n) * dir).max(0);
+        if self.intent > limit {
+            return None;
+        }
+        let t = self.edge_n + dir * self.intent / 4;
+        self.set = if vertical { (t, py) } else { (px, t) };
+        Some(self.set)
+    }
+}
+
+/// Manda il bagliore alla GUI solo se cambiato in modo visibile.
+fn emit(sh: &Shared, last: &mut Option<Glow>, g: Option<Glow>) {
+    let same = match (*last, g) {
+        (Some(a), Some(b)) => a.edge == b.edge && a.x == b.x && a.y == b.y && (a.level - b.level).abs() < 0.01,
+        (a, b) => a.is_none() && b.is_none(),
+    };
+    if !same && sh.glow.get().map_or(true, |sink| sink(g)) {
+        *last = g;
+    }
+}
+
 #[cfg(windows)]
 fn set_cursor(x: i32, y: i32) {
     unsafe { windows_sys::Win32::UI::WindowsAndMessaging::SetCursorPos(x, y) };
@@ -90,6 +154,7 @@ pub struct Shared {
     pub running: AtomicBool,
     pub devices: Mutex<Vec<LogiDevice>>,
     pub log: Mutex<Vec<String>>,
+    pub glow: OnceLock<GlowSink>,
     scanning: AtomicBool,
 }
 
@@ -100,6 +165,7 @@ impl Shared {
             running: AtomicBool::new(false),
             devices: Mutex::new(Vec::new()),
             log: Mutex::new(Vec::new()),
+            glow: OnceLock::new(),
             scanning: AtomicBool::new(false),
         })
     }
@@ -189,10 +255,14 @@ pub fn spawn(sh: Arc<Shared>) {
         let mut last_own: Option<(i32, i32)> = None;
         let mut mon_armed = true;
         let mut warned_all_shared = false;
+        let mut hold: Option<Hold> = None;
+        let mut last_glow: Option<Glow> = None;
 
         loop {
             if !sh.running.load(Ordering::Relaxed) {
                 last_scan = None;
+                hold = None;
+                emit(&sh, &mut last_glow, None);
                 thread::sleep(Duration::from_millis(200));
                 continue;
             }
@@ -210,7 +280,7 @@ pub fn spawn(sh: Arc<Shared>) {
             }
 
             let mouse = dq.get_mouse();
-            let (px, py) = mouse.coords;
+            let (mut px, mut py) = mouse.coords;
             let pressed = mouse.button_pressed.iter().any(|&b| b);
             let dragging = cfg.ignore_while_dragging && pressed;
 
@@ -242,41 +312,78 @@ pub fn spawn(sh: Arc<Shared>) {
                     sh.log(format!("[*] monitor {}: passo al canale {}", cur.unwrap().key(), rule.channel));
                     sh.switch_all(rule);
                 }
+                hold = None;
+                emit(&sh, &mut last_glow, None);
                 continue;
             }
             last_own = Some((px, py));
             mon_armed = true;
 
-            let Some(edge) = outer_edge_hit(&own, px, py, cfg.corner_margin_px) else {
-                edge_since = None;
-                armed = true;
-                continue;
-            };
-            let Some(rule) = cfg.edge_rule(edge) else { continue };
-            if !armed || now < cooldown_until {
-                continue;
-            }
-            if dragging {
-                edge_since = None;
-                continue;
-            }
-            match edge_since {
-                Some((e, since)) if e == edge => {
-                    if now - since < Duration::from_millis(cfg.dwell_ms) {
-                        continue;
+            let glow = 'g: {
+                let mut hit = outer_edge_hit(&own, px, py, cfg.corner_margin_px);
+                if let Some(mut h) = hold.take() {
+                    if !dragging && hit.map_or(true, |e| e == h.edge) {
+                        if let Some(p) = h.pull(px, py, cfg.resist_px) {
+                            if p != (px, py) {
+                                set_cursor(p.0, p.1);
+                            }
+                            (px, py) = p;
+                            hit = Some(h.edge);
+                            hold = Some(h);
+                        }
+                    }
+                    if hold.is_none() {
+                        edge_since = None; // strappo deciso: attesa annullata
                     }
                 }
-                _ => {
-                    edge_since = Some((edge, now));
-                    continue;
-                }
-            }
 
-            armed = false;
-            edge_since = None;
-            cooldown_until = now + Duration::from_secs_f64(cfg.cooldown_s);
-            sh.log(format!("[*] bordo {edge}: passo al canale {}", rule.channel));
-            sh.switch_all(rule);
+                let Some(edge) = hit else {
+                    edge_since = None;
+                    armed = true;
+                    // Avvicinamento: bagliore tenue che cresce man mano che il cursore si accosta.
+                    if !dragging && now >= cooldown_until && cfg.glow_distance_px > 0 {
+                        if let Some((e, d, (x, y))) = near_edge(&own, px, py, cfg.corner_margin_px, cfg.glow_distance_px) {
+                            if cfg.edge_rule(e).is_some() {
+                                let level = 0.35 * (1.0 - d as f32 / (cfg.glow_distance_px + 1) as f32);
+                                break 'g Some(Glow { x, y, edge: e, level });
+                            }
+                        }
+                    }
+                    break 'g None;
+                };
+                let Some(rule) = cfg.edge_rule(edge) else { break 'g None };
+                if !armed || now < cooldown_until {
+                    break 'g None;
+                }
+                if dragging {
+                    edge_since = None;
+                    break 'g None;
+                }
+                let since = match edge_since {
+                    Some((e, since)) if e == edge => since,
+                    _ => {
+                        edge_since = Some((edge, now));
+                        if cfg.resist_px > 0 {
+                            hold = Some(Hold::new(edge, px, py));
+                        }
+                        now
+                    }
+                };
+                let progress = (now - since).as_secs_f32() * 1000.0 / cfg.dwell_ms.max(1) as f32;
+                if since == now || progress < 1.0 {
+                    break 'g Some(Glow { x: px, y: py, edge, level: 0.35 + 0.65 * progress.min(1.0) });
+                }
+
+                emit(&sh, &mut last_glow, Some(Glow { x: px, y: py, edge, level: 1.0 }));
+                armed = false;
+                edge_since = None;
+                hold = None;
+                cooldown_until = now + Duration::from_secs_f64(cfg.cooldown_s);
+                sh.log(format!("[*] bordo {edge}: passo al canale {}", rule.channel));
+                sh.switch_all(rule);
+                None
+            };
+            emit(&sh, &mut last_glow, glow);
         }
     });
 }
@@ -296,5 +403,27 @@ mod tests {
         assert_eq!(outer_edge_hit(&all, -3840, 10, 40), None); // angolo
         assert_eq!(outer_edge_hit(&[l, r], -1, 1000, 40), Some("right")); // centro escluso
         assert_eq!(outer_edge_hit(&all, 100, 2159, 40), Some("bottom"));
+    }
+
+    #[test]
+    fn near_edge_only_outer_and_within_distance() {
+        let l = Rect { x: -1920, y: 0, w: 1920, h: 1080 };
+        let c = Rect { x: 0, y: 0, w: 1920, h: 1080 };
+        let all = [l, c];
+        assert_eq!(near_edge(&all, -1900, 500, 40, 50), Some(("left", 20, (-1920, 500))));
+        assert_eq!(near_edge(&all, -1800, 500, 40, 50), None); // troppo lontano
+        assert_eq!(near_edge(&all, 10, 500, 40, 50), None); // bordo interno
+        assert_eq!(near_edge(&all, 1900, 500, 40, 50), Some(("right", 19, (1919, 500))));
+    }
+
+    #[test]
+    fn hold_brakes_then_releases() {
+        let mut h = Hold::new("left", 0, 500);
+        assert_eq!(h.pull(8, 500, 30), Some((2, 500))); // 8 px di spinta -> 2 px reali
+        assert_eq!(h.pull(2, 520, 30), Some((2, 520))); // lungo il bordo: libero
+        assert_eq!(h.pull(0, 520, 30), Some((1, 520))); // ritorno verso il bordo riduce la spinta
+        assert_eq!(h.pull(30, 520, 30), None); // strappo oltre il limite
+        let mut b = Hold::new("bottom", 700, 1079);
+        assert_eq!(b.pull(700, 1071, 30), Some((700, 1077)));
     }
 }
