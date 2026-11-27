@@ -38,6 +38,10 @@ pub struct Config {
     pub corner_margin_px: i32,
     pub cooldown_s: f64,
     pub ignore_while_dragging: bool,
+    /// distanza dal bordo (px) a cui inizia il bagliore; 0 = solo durante l'attesa
+    pub glow_distance_px: i32,
+    /// spinta (px) oltre la quale il cursore si libera e l'attesa si annulla; 0 = nessuna resistenza
+    pub resist_px: i32,
     pub poll_hz: u32,
 }
 
@@ -50,6 +54,8 @@ impl Default for Config {
             corner_margin_px: 40,
             cooldown_s: 2.0,
             ignore_while_dragging: true,
+            glow_distance_px: 80,
+            resist_px: 40,
             poll_hz: 100,
         }
     }
