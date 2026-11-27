@@ -4,6 +4,28 @@ Sposta il mouse contro il bordo dello schermo verso l'altro PC: **mouse e tastie
 
 Il programma usa il protocollo HID++ di Logitech (feature `0x1814 Change Host`), cioè lo stesso comando che parte quando premi il tasto Easy-Switch. Funziona sia con il Bluetooth diretto sia con i ricevitori Logi Bolt e Unifying.
 
+## Download
+
+| Sistema | File | Note |
+|---|---|---|
+| **Windows 10/11** (x64) | [LogiEdgeSwitch-windows-x64.exe](https://github.com/j0rdan-conectsltd/logi-edge-switch/releases/latest/download/LogiEdgeSwitch-windows-x64.exe) | Un solo file, nessuna installazione. Al primo avvio SmartScreen può chiedere conferma: *Ulteriori informazioni* → *Esegui comunque*. |
+| **macOS 11+** (Apple Silicon e Intel) | [LogiEdgeSwitch-macos.dmg](https://github.com/j0rdan-conectsltd/logi-edge-switch/releases/latest/download/LogiEdgeSwitch-macos.dmg) | Apri il .dmg e trascina l'app in *Applicazioni*. |
+
+Tutte le versioni: [Releases](https://github.com/j0rdan-conectsltd/logi-edge-switch/releases).
+
+### Primo avvio
+
+1. Avvia l'app: le periferiche Logitech collegate compaiono da sole in *Periferiche*.
+2. Clicca i monitor o scegli i bordi verso l'altro PC, poi **Salva configurazione** e **Avvia**.
+3. Attiva **Avvia all'accesso** in *Impostazioni*: da quel momento parte da sola, già attiva.
+4. Ripeti sull'altro PC.
+
+Su **macOS**, la prima volta:
+- se l'app non è firmata, macOS la blocca: *Impostazioni di Sistema → Privacy e sicurezza → Apri comunque*;
+- concedi *Monitoraggio input* (serve per parlare con mouse e tastiera) e *Accessibilità* (serve per leggere e spostare il cursore), poi riapri l'app.
+
+La configurazione è salvata in `%APPDATA%\Logi Edge Switch\config.json` (Windows) o `~/Library/Application Support/Logi Edge Switch/config.json` (macOS). Se accanto all'eseguibile c'è un `config.json`, viene usato quello (uso portatile, da chiavetta).
+
 ## Come funziona
 
 ```
@@ -14,7 +36,7 @@ Il programma usa il protocollo HID++ di Logitech (feature `0x1814 Change Host`),
  └──────────────┘                    └──────────────┘
 ```
 
-1. Ogni PC esegue `edge_switch.py` con il proprio config.
+1. Ogni PC esegue Logi Edge Switch con la propria configurazione.
 2. Quando il cursore resta per `dwell_ms` (150 ms) su un bordo **esterno**, cioè un bordo oltre il quale non c'è un altro monitor dello stesso PC, il programma invia "cambia canale" a tutte le periferiche Logitech collegate.
 3. In alternativa ai bordi, un monitor collegato a entrambi i PC può essere marcato "condiviso": entrandoci si passa all'altro PC e il cursore torna indietro, così al rientro non riscatta.
 
@@ -23,9 +45,9 @@ Protezioni contro i cambi involontari:
 - nessun cambio mentre tieni premuto un tasto del mouse, per esempio quando trascini una finestra per agganciarla al bordo;
 - dopo un cambio c'è un periodo di attesa (`cooldown_s`), e il cursore deve staccarsi dal bordo prima di poter scattare di nuovo.
 
-## Installazione (su ogni PC)
+## Compilare dai sorgenti
 
-Serve Rust (https://rustup.rs). Su Windows servono anche i Visual Studio Build Tools (C++).
+Serve solo per sviluppare; per usarlo basta il [Download](#download). Serve Rust (https://rustup.rs). Su Windows servono anche i Visual Studio Build Tools (C++).
 
 ```bash
 cargo build --release
@@ -52,7 +74,7 @@ Il modo più semplice è l'interfaccia grafica: lancia `logi-edge-switch` senza 
 - **Periferiche**: elenco, nuova ricerca e pulsanti per provare il cambio canale.
 - **Avvia/Ferma** e **Salva configurazione** (le modifiche valgono subito, il salvataggio le rende permanenti).
 
-Con `--start` parte già attivo e ridotto a icona (utile per l'avvio automatico). `-c file.json` usa un config diverso; senza, usa `config.json` accanto all'eseguibile.
+Con `--start` parte già attivo e ridotto a icona (utile per l'avvio automatico). `-c file.json` usa un config diverso; senza, usa quello descritto in [Primo avvio](#primo-avvio).
 
 Da riga di comando:
 
@@ -86,8 +108,8 @@ Da riga di comando:
 
 ## Avvio automatico
 
-- **Windows**: crea un collegamento a `avvia.bat --start` nella cartella `shell:startup`.
-- **macOS**: usa un LaunchAgent, oppure aggiungi uno script agli *Elementi login*.
+Su Windows e macOS basta l'interruttore **Avvia all'accesso** in *Impostazioni* (aggiunge l'app alla chiave `Run` dell'utente su Windows, crea un LaunchAgent su macOS).
+
 - **Linux**: usa un servizio utente systemd, oppure crea una voce `.desktop` in `~/.config/autostart`.
 
 ## Note e limiti

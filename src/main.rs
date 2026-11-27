@@ -10,13 +10,14 @@
 //!   logi-edge-switch -c altro.json   config diverso
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod autostart;
 mod config;
 mod engine;
 mod gui;
 mod hidpp;
 
 use config::Config;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 fn main() {
@@ -57,9 +58,7 @@ fn main() {
         return;
     }
 
-    let cfg_path = value("-c").map(PathBuf::from).unwrap_or_else(|| {
-        std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("config.json"))).unwrap_or("config.json".into())
-    });
+    let cfg_path = value("-c").map(PathBuf::from).unwrap_or_else(default_config);
     let (cfg, err) = if cfg_path.exists() {
         match Config::load(&cfg_path) {
             Ok(c) => (c, None),
@@ -83,4 +82,25 @@ fn main() {
     engine::spawn(sh.clone());
 
     gui::run(sh, cfg_path, flag("--start"));
+}
+
+/// `config.json` accanto all'eseguibile se c'è (uso portatile), altrimenti nella cartella dati
+/// dell'utente: un'app installata (/Applications, Program Files) non può scrivere accanto a sé.
+fn default_config() -> PathBuf {
+    let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf));
+    if let Some(p) = exe_dir.as_ref().map(|d| d.join("config.json")).filter(|p| p.exists()) {
+        return p;
+    }
+    let home = || std::env::var_os("HOME").map(PathBuf::from);
+    let base = if cfg!(windows) {
+        std::env::var_os("APPDATA").map(PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        home().map(|h| h.join("Library/Application Support"))
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| home().map(|h| h.join(".config")))
+    };
+    match base {
+        Some(b) => b.join("Logi Edge Switch").join("config.json"),
+        None => exe_dir.unwrap_or_default().join("config.json"),
+    }
 }

@@ -1,0 +1,111 @@
+# Compila i download per Windows e macOS.
+# - push di un tag vX.Y.Z: crea la Release su GitHub con i file allegati
+# - avvio manuale (Actions > release > Run workflow): solo artefatti scaricabili, nessuna Release
+#
+# Firma macOS opzionale (senza, l'app ha una firma ad-hoc e al primo avvio va aperta da
+# Impostazioni di Sistema > Privacy e sicurezza > "Apri comunque"). Segreti del repository:
+#   MACOS_CERT_P12        certificato "Developer ID Application" in base64 (.p12)
+#   MACOS_CERT_PASSWORD   password del .p12
+#   MACOS_SIGN_IDENTITY   es. "Developer ID Application: Nome Cognome (TEAMID)"
+#   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD   per la notarizzazione (password specifica per app)
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - run: |
+          mkdir dist
+          copy target\release\logi-edge-switch.exe dist\LogiEdgeSwitch-windows-x64.exe
+        shell: cmd
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+
+  macos:
+    runs-on: macos-latest
+    env:
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Compila (Apple Silicon + Intel)
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+      - name: Crea l'app universale
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          APP="dist/Logi Edge Switch.app"
+          mkdir -p "$APP/Contents/MacOS"
+          lipo -create -output "$APP/Contents/MacOS/logi-edge-switch" \
+            target/aarch64-apple-darwin/release/logi-edge-switch \
+            target/x86_64-apple-darwin/release/logi-edge-switch
+          sed "s/__VERSION__/$VERSION/g" packaging/macos/Info.plist > "$APP/Contents/Info.plist"
+      - name: Firma ad-hoc
+        if: env.MACOS_CERT_P12 == ''
+        run: codesign --force --sign - "dist/Logi Edge Switch.app"
+      - name: Firma Developer ID
+        if: env.MACOS_CERT_P12 != ''
+        env:
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          echo "$MACOS_CERT_P12" | base64 --decode > cert.p12
+          security create-keychain -p ci build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p ci build.keychain
+          security import cert.p12 -k build.keychain -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci build.keychain
+          rm cert.p12
+          codesign --force --options runtime --timestamp --sign "$IDENTITY" "dist/Logi Edge Switch.app"
+      - name: Crea il .dmg
+        run: |
+          mkdir dmg
+          cp -R "dist/Logi Edge Switch.app" dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname "Logi Edge Switch" -srcfolder dmg -ov -format UDZO dist/LogiEdgeSwitch-macos.dmg
+          rm -rf "dist/Logi Edge Switch.app"
+      - name: Notarizza
+        if: env.MACOS_CERT_P12 != ''
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          xcrun notarytool submit dist/LogiEdgeSwitch-macos.dmg --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple dist/LogiEdgeSwitch-macos.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

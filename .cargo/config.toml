@@ -1,0 +1,6 @@
+# Runtime C statico: l'exe parte su qualsiasi Windows senza installare il Visual C++ Redistributable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

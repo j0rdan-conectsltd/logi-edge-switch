@@ -78,6 +78,9 @@ impl Config {
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
         let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?; // primo salvataggio nella cartella utente
+        }
         std::fs::write(path, text + "\n").map_err(|e| format!("{}: {e}", path.display()))
     }
 

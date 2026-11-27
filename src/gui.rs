@@ -23,12 +23,14 @@ pub struct Gui {
     status: String,
     focused: bool,
     minimize: bool,
+    /// avvio all'accesso; `None` dove non è gestito
+    autostart: Option<bool>,
     seen: (usize, Option<String>, usize, bool),
 }
 
 pub fn run(sh: Arc<Shared>, cfg_path: PathBuf, start_minimized: bool) {
     let saved = sh.cfg.lock().unwrap().clone();
-    let state = Gui { sh, cfg_path, saved, monitors: get_monitors(), status: String::new(), focused: true, minimize: start_minimized, seen: (0, None, 0, false) };
+    let state = Gui { sh, cfg_path, saved, monitors: get_monitors(), status: String::new(), focused: true, minimize: start_minimized, autostart: crate::autostart::enabled(), seen: (0, None, 0, false) };
     let mut spec = AppSpec { min_size: Some((680.0, 600.0)), poll: Some(poll), ..AppSpec::new("Logi Edge Switch", (720.0, 760.0), || unreachable!(), view) };
     if cfg!(target_os = "macos") {
         spec.families = (".AppleSystemUIFont, SF Pro Text, Helvetica Neue", "ui-monospace"); // font di sistema (SF)
@@ -248,7 +250,7 @@ fn view(s: &Gui, cx: &mut Cx<Gui>) -> El {
         let content = col().key("content").w_full().grow(1.0).scroll(ScrollSpec::default()).gap(12.0).px(16.0).pb(4.0)
             .child(layout_card(s, &cfg, &p))
             .child(devices_card(s, &p))
-            .child(settings_card(&cfg, &p));
+            .child(settings_card(s, &cfg, &p));
         // fondo vibrante dietro la finestra (NSVisualEffectView), come le finestre di sistema
         return col().key("root").w_full().h_full().gap(12.0).pb(16.0).system_material(SystemMaterial::Sidebar)
             .child(toolbar(s, &cfg, &p, cx.chrome_insets().leading))
@@ -267,7 +269,7 @@ fn view(s: &Gui, cx: &mut Cx<Gui>) -> El {
     let content = col().key("content").w_full().grow(1.0).scroll(ScrollSpec::default()).gap(14.0).pb(4.0)
         .child(layout_card(s, &cfg, &p))
         .child(devices_card(s, &p))
-        .child(settings_card(&cfg, &p));
+        .child(settings_card(s, &cfg, &p));
 
     col().key("root").w_full().h_full().padding(16.0).gap(14.0).gradient(bg_top, bg_bot)
         .child(header(s, &cfg, &p))
@@ -442,7 +444,7 @@ fn devices_card(s: &Gui, p: &Pal) -> El {
         .children(tests))
 }
 
-fn settings_card(cfg: &Config, p: &Pal) -> El {
+fn settings_card(s: &Gui, cfg: &Config, p: &Pal) -> El {
     let stepper = |key: &'static str, label: &str, value: String, f: fn(&mut Config, f64), step: f64| {
         row().w_full().gap(8.0).center_y()
             .child(text(label.to_string()).grow(1.0).font(TextStyle::new(12.5, 500.0)).color(p.fg))
@@ -450,26 +452,36 @@ fn settings_card(cfg: &Config, p: &Pal) -> El {
             .child(text(value).w(64.0).center().font(TextStyle::new(13.0, 600.0).features("'tnum' 1")).color(p.fg))
             .child(pill(p, format!("{key}+"), "+", false).w(34.0).on_press(move |s: &mut Gui| f(&mut s.sh.cfg.lock().unwrap(), step)))
     };
-    let on = cfg.ignore_while_dragging;
-    let knob = el().key("knob").size(18.0, 18.0).radius(9.0).fill(Color::WHITE).absolute(if on { 18.0 } else { 2.0 }, 2.0).shadow(1.0, 3.0, p.shadow);
-    let switch = el().key("drag-switch").role("switch").label("Ignora mentre trascini").checked(on).focusable(true).hit()
-        .size(38.0, 22.0).radius(11.0)
-        .fill(if on { if p.mac { p.accent } else { p.ok } } else { p.chip }).border(1.0, p.rim)
-        .motion(motion::SNAPPY)
-        .on_press(|s: &mut Gui| {
-            let mut c = s.sh.cfg.lock().unwrap();
-            c.ignore_while_dragging = !c.ignore_while_dragging;
-        })
-        .child(knob);
     glass(p, "Impostazioni")
         .child(stepper("dwell", "Attesa sul bordo (ms)", cfg.dwell_ms.to_string(), |c, d| c.dwell_ms = (c.dwell_ms as f64 + d).clamp(0.0, 2000.0) as u64, 50.0))
         .child(stepper("margin", "Margine angoli (px)", cfg.corner_margin_px.to_string(), |c, d| c.corner_margin_px = (c.corner_margin_px as f64 + d).clamp(0.0, 500.0) as i32, 5.0))
         .child(stepper("cool", "Pausa tra due cambi (s)", format!("{:.1}", cfg.cooldown_s), |c, d| c.cooldown_s = ((c.cooldown_s + d) * 10.0).round().clamp(0.0, 300.0) / 10.0, 0.1))
         .child(stepper("glow", "Bagliore da (px dal bordo, 0 = solo in attesa)", cfg.glow_distance_px.to_string(), |c, d| c.glow_distance_px = (c.glow_distance_px as f64 + d).clamp(0.0, 400.0) as i32, 10.0))
         .child(stepper("resist", "Resistenza cursore (px, 0 = nessuna)", cfg.resist_px.to_string(), |c, d| c.resist_px = (c.resist_px as f64 + d).clamp(0.0, 200.0) as i32, 10.0))
-        .child(row().w_full().gap(8.0).center_y()
-            .child(text("Ignora mentre trascini").grow(1.0).font(TextStyle::new(12.5, 500.0)).color(p.fg))
-            .child(switch))
+        .child(toggle(p, "drag-switch", "Ignora mentre trascini", cfg.ignore_while_dragging, |s: &mut Gui| {
+            let mut c = s.sh.cfg.lock().unwrap();
+            c.ignore_while_dragging = !c.ignore_while_dragging;
+        }))
+        .children(s.autostart.map(|on| {
+            toggle(p, "autostart", "Avvia all'accesso (attivo e ridotto a icona)", on, move |s: &mut Gui| match crate::autostart::set(!on) {
+                Ok(()) => s.autostart = Some(!on),
+                Err(e) => s.status = format!("Avvio automatico: {e}"),
+            })
+        }))
+}
+
+/// Riga con etichetta e interruttore.
+fn toggle(p: &Pal, key: &'static str, label: &'static str, on: bool, f: impl Fn(&mut Gui) + 'static) -> El {
+    let knob = el().size(18.0, 18.0).radius(9.0).fill(Color::WHITE).absolute(if on { 18.0 } else { 2.0 }, 2.0).shadow(1.0, 3.0, p.shadow);
+    let switch = el().key(key).role("switch").label(label).checked(on).focusable(true).hit()
+        .size(38.0, 22.0).radius(11.0)
+        .fill(if on { if p.mac { p.accent } else { p.ok } } else { p.chip }).border(1.0, p.rim)
+        .motion(motion::SNAPPY)
+        .on_press(f)
+        .child(knob);
+    row().w_full().gap(8.0).center_y()
+        .child(text(label).grow(1.0).font(TextStyle::new(12.5, 500.0)).color(p.fg))
+        .child(switch)
 }
 
 fn log_card(s: &Gui, p: &Pal) -> El {
