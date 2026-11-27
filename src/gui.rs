@@ -1,15 +1,15 @@
-﻿//! Interfaccia in Rune: finestra trasparente con Acrylic di Windows 11 dietro e pannelli
+//! Interfaccia in Rune: finestra trasparente con Acrylic di Windows 11 dietro e pannelli
 //! "liquid glass" (riempimento traslucido, riflesso a gradiente, bordo chiaro, ombra morbida).
 use crate::config::{Config, Rule};
 use crate::engine::{get_monitors, Glow, Rect, Shared};
 use rune::tok::motion;
 use rune::{
     col, el, oklch, oklcha, row, text, App, AppSpec, Color, Cx, DisplayTarget, El, KeyPolicy, OverlayInput, OverlayLevel, OverlayOptions,
-    OverlayPlacement, OverlaySpec, ScrollSpec, TextStyle, Tx, WindowBackdrop, WindowOptions,
+    OverlayPlacement, OverlaySpec, ScrollSpec, SystemMaterial, TextStyle, Titlebar, Tx, WindowBackdrop, WindowOptions,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 const EDGE_LABELS: [(&str, &str); 4] = [("left", "Sinistra"), ("right", "Destra"), ("top", "Sopra"), ("bottom", "Sotto")];
@@ -29,14 +29,22 @@ pub struct Gui {
 pub fn run(sh: Arc<Shared>, cfg_path: PathBuf, start_minimized: bool) {
     let saved = sh.cfg.lock().unwrap().clone();
     let state = Gui { sh, cfg_path, saved, monitors: get_monitors(), status: String::new(), focused: true, minimize: start_minimized, seen: (0, None, 0, false) };
-    let spec = AppSpec { min_size: Some((680.0, 600.0)), poll: Some(poll), ..AppSpec::new("Logi Edge Switch", (720.0, 760.0), || unreachable!(), view) };
+    let mut spec = AppSpec { min_size: Some((680.0, 600.0)), poll: Some(poll), ..AppSpec::new("Logi Edge Switch", (720.0, 760.0), || unreachable!(), view) };
+    if cfg!(target_os = "macos") {
+        spec.families = (".AppleSystemUIFont, SF Pro Text, Helvetica Neue", "ui-monospace"); // font di sistema (SF)
+    }
     let sh = state.sh.clone();
     let mut app = App::new(spec)
         .init(move || state)
         .args(Vec::<String>::new()) // la riga di comando è nostra (--start, -c), non di Rune
         .window_options(WindowOptions { transparent: true, ..Default::default() })
-        .window_backdrop(WindowBackdrop::Acrylic)
+        .window_backdrop(WindowBackdrop::Acrylic) // solo Windows 11; altrove nessun effetto
+        .standard_menus() // macOS: menu Modifica/Finestra standard; altrove nessun effetto
         .on_focus(|s, f, _| s.focused = f);
+    if cfg!(target_os = "macos") {
+        // barra del titolo disegnata dalla vista (toolbar unificata), semafori di sistema sopra
+        app = app.titlebar(Titlebar::new(TOOLBAR_H));
+    }
 
     // Bagliore: overlay trasparente, non cliccabile, a tutto schermo sul monitor del cursore.
     let opts = OverlayOptions {
@@ -113,7 +121,17 @@ fn poll(s: &mut Gui, _: f64, tx: &mut Tx) -> bool {
     std::mem::replace(&mut s.seen, now.clone()) != now
 }
 
+const TOOLBAR_H: f32 = 52.0;
+
+/// Aspetto macOS. In debug `LOGI_MAC_UI=1` lo forza anche altrove, per le anteprime headless.
+static MAC: LazyLock<bool> = LazyLock::new(|| cfg!(target_os = "macos") || (cfg!(debug_assertions) && std::env::var_os("LOGI_MAC_UI").is_some()));
+
 struct Pal {
+    mac: bool,
+    /// fondo dei gruppi stile Impostazioni di Sistema (solo macOS)
+    group: Color,
+    /// segmento scelto del controllo segmentato (solo macOS)
+    seg_on: Color,
     fg: Color,
     dim: Color,
     sheen: (Color, Color),
@@ -125,10 +143,36 @@ struct Pal {
     ok: Color,
 }
 
-fn pal(dark: bool) -> Pal {
+fn pal(dark: bool, system_accent: Color) -> Pal {
     let w = Color::WHITE;
+    let k = Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+    if *MAC {
+        // colori di sistema macOS: etichette, riempimenti e separatori come AppKit, accento dell'utente
+        let (fg, group, rim, chip, seg_on, well) = if dark {
+            (w, w.alpha(0.06), w.alpha(0.10), w.alpha(0.12), w.alpha(0.24), k.alpha(0.20))
+        } else {
+            (k.alpha(0.85), w.alpha(0.70), k.alpha(0.09), k.alpha(0.06), w, k.alpha(0.04))
+        };
+        return Pal {
+            mac: true,
+            group,
+            seg_on,
+            fg,
+            dim: fg.alpha(if dark { 0.55 } else { 0.5 }),
+            sheen: (group, group),
+            rim,
+            chip,
+            shadow: k.alpha(if dark { 0.30 } else { 0.12 }),
+            well,
+            accent: system_accent,
+            ok: oklch(if dark { 0.75 } else { 0.68 }, 0.19, 145.0),
+        };
+    }
     if dark {
         Pal {
+            mac: false,
+            group: w,
+            seg_on: w,
             fg: w,
             dim: w.alpha(0.62),
             sheen: (w.alpha(0.16), w.alpha(0.05)),
@@ -142,6 +186,9 @@ fn pal(dark: bool) -> Pal {
     } else {
         let ink = oklch(0.22, 0.01, 260.0);
         Pal {
+            mac: false,
+            group: w,
+            seg_on: w,
             fg: ink,
             dim: ink.alpha(0.6),
             sheen: (w.alpha(0.72), w.alpha(0.38)),
@@ -157,6 +204,11 @@ fn pal(dark: bool) -> Pal {
 
 /// Pannello di vetro: riflesso in alto più chiaro, bordo luminoso, ombra diffusa.
 fn glass(p: &Pal, title: &str) -> El {
+    if p.mac {
+        // gruppo stile Impostazioni di Sistema: piatto, angoli 12, bordo sottile
+        return col().w_full().radius(12.0).padding(14.0).gap(10.0).fill(p.group).border(0.5, p.rim)
+            .child(text(title).font(TextStyle::new(13.0, 650.0)).color(p.fg));
+    }
     col().w_full().radius(22.0).padding(18.0).gap(12.0)
         .gradient(p.sheen.0, p.sheen.1)
         .border(1.0, p.rim)
@@ -167,6 +219,15 @@ fn glass(p: &Pal, title: &str) -> El {
 /// Pulsante a pillola; `on` lo evidenzia col colore d'accento.
 fn pill(p: &Pal, key: impl Into<String>, label: impl Into<String>, on: bool) -> El {
     let label = label.into();
+    if p.mac {
+        // pulsante AppKit: rettangolo arrotondato 24 pt, prominente col colore d'accento
+        return row().key(key).role("button").label(label.clone()).focusable(true).hit()
+            .h(24.0).px(10.0).center().radius(6.0)
+            .fill(if on { p.accent } else { p.chip })
+            .border(0.5, if on { p.accent } else { p.rim })
+            .motion(motion::SNAPPY)
+            .child(text(label).font(TextStyle::new(13.0, 500.0)).color(if on { Color::WHITE } else { p.fg }));
+    }
     row().key(key).role("button").label(label.clone()).focusable(true).hit()
         .h(30.0).px(14.0).center().radius(15.0)
         .fill(if on { p.accent.alpha(0.85) } else { p.chip })
@@ -181,8 +242,19 @@ fn body(p: &Pal, s: impl Into<String>) -> El {
 
 fn view(s: &Gui, cx: &mut Cx<Gui>) -> El {
     let dark = cx.system_dark();
-    let p = pal(dark);
+    let p = pal(dark, cx.accent());
     let cfg = s.sh.cfg.lock().unwrap().clone();
+    if p.mac {
+        let content = col().key("content").w_full().grow(1.0).scroll(ScrollSpec::default()).gap(12.0).px(16.0).pb(4.0)
+            .child(layout_card(s, &cfg, &p))
+            .child(devices_card(s, &p))
+            .child(settings_card(&cfg, &p));
+        // fondo vibrante dietro la finestra (NSVisualEffectView), come le finestre di sistema
+        return col().key("root").w_full().h_full().gap(12.0).pb(16.0).system_material(SystemMaterial::Sidebar)
+            .child(toolbar(s, &cfg, &p, cx.chrome_insets().leading))
+            .child(content)
+            .child(col().w_full().px(16.0).child(log_card(s, &p)));
+    }
     // Acrylic si vede solo con la finestra in primo piano: altrimenti fondo pieno leggibile.
     let live = cx.window_backdrop().is_active() && s.focused;
     let (bg_top, bg_bot) = match (live, dark) {
@@ -203,11 +275,11 @@ fn view(s: &Gui, cx: &mut Cx<Gui>) -> El {
         .child(log_card(s, &p))
 }
 
-fn header(s: &Gui, cfg: &Config, p: &Pal) -> El {
+/// Pulsanti Avvia/Ferma e Salva, condivisi da header (Windows) e toolbar (macOS).
+fn actions(s: &Gui, cfg: &Config, p: &Pal) -> (El, El, String) {
     let running = s.sh.running.load(Ordering::Relaxed);
     let dirty = *cfg != s.saved;
-    let dot = el().size(10.0, 10.0).radius(5.0).fill(if running { p.ok } else { p.dim }).motion(motion::SNAPPY);
-    let toggle = pill(p, "run", if running { "Ferma" } else { "Avvia" }, !running).on_press(move |s: &mut Gui| {
+    let toggle = pill(p, "run", if running { "Ferma" } else { "Avvia" }, !running && !p.mac).on_press(move |s: &mut Gui| {
         s.sh.running.store(!running, Ordering::Relaxed);
         s.sh.log(if running { "[i] fermato" } else { "[i] avviato" });
     });
@@ -226,6 +298,32 @@ fn header(s: &Gui, cfg: &Config, p: &Pal) -> El {
         pill(p, "save", "Salva configurazione", false).disabled(true).opacity(0.45)
     };
     let note = if dirty { "modifiche non salvate (già attive)".to_string() } else { s.status.clone() };
+    (toggle, save, note)
+}
+
+/// macOS: toolbar unificata nella barra del titolo, dopo i semafori; i pulsanti stanno in
+/// una capsula di Liquid Glass di sistema (NSGlassEffectView su macOS 26, popover prima).
+fn toolbar(s: &Gui, cfg: &Config, p: &Pal, lead: f32) -> El {
+    let running = s.sh.running.load(Ordering::Relaxed);
+    let (toggle, save, note) = actions(s, cfg, p);
+    let status = row().gap(6.0).center_y()
+        .child(el().size(8.0, 8.0).radius(4.0).fill(if running { p.ok } else { p.dim }).motion(motion::SNAPPY))
+        .child(text(if running { "Attivo" } else { "Fermo" }).font(TextStyle::new(12.0, 500.0)).color(p.dim));
+    let group = row().key("toolbar-glass").h(36.0).px(6.0).gap(6.0).center_y().radius(18.0)
+        .border(0.5, p.rim).shadow(2.0, 10.0, p.shadow)
+        .system_material(SystemMaterial::Glass)
+        .child(toggle).child(save);
+    row().key("toolbar").w_full().h(TOOLBAR_H).pl(lead + 12.0).pr(12.0).gap(12.0).center_y().window_drag()
+        .child(text("Logi Edge Switch").font(TextStyle::new(15.0, 700.0)).color(p.fg))
+        .child(status)
+        .child(text(note).grow(1.0).truncate().font(TextStyle::new(11.5, 450.0)).color(p.dim))
+        .child(group)
+}
+
+fn header(s: &Gui, cfg: &Config, p: &Pal) -> El {
+    let running = s.sh.running.load(Ordering::Relaxed);
+    let dot = el().size(10.0, 10.0).radius(5.0).fill(if running { p.ok } else { p.dim }).motion(motion::SNAPPY);
+    let (toggle, save, note) = actions(s, cfg, p);
     row().w_full().radius(26.0).px(16.0).py(10.0).gap(10.0).center_y()
         .gradient(p.sheen.0, p.sheen.1).border(1.0, p.rim).shadow(8.0, 24.0, p.shadow)
         .child(dot)
@@ -278,7 +376,7 @@ fn layout_card(s: &Gui, cfg: &Config, p: &Pal) -> El {
         };
         Some(text(t).absolute(x, y).font(TextStyle::new(14.0, 700.0)).color(p.accent))
     });
-    let map = el().key("map").size(MAP.0, MAP.1).radius(16.0).fill(p.well).border(1.0, p.rim.alpha(0.5)).children(screens).children(arrows);
+    let map = el().key("map").size(MAP.0, MAP.1).radius(16.0).fill(p.well).border(if p.mac { 0.0 } else { 1.0 }, p.rim.alpha(0.5)).children(screens).children(arrows);
     card = card.child(row().w_full().center().child(map));
     if s.status.starts_with("Almeno") {
         card = card.child(text(s.status.clone()).w_full().wrap().font(TextStyle::new(12.0, 600.0)).color(p.accent));
@@ -288,6 +386,24 @@ fn layout_card(s: &Gui, cfg: &Config, p: &Pal) -> El {
     card = card.child(body(p, "Bordi esterni (dove non c'è un altro monitor di questo PC):"));
     for (edge, label) in EDGE_LABELS {
         let cur = cfg.edge_rule(edge).map(|r| r.channel);
+        if p.mac {
+            // controllo segmentato AppKit: una capsula, il segmento scelto in rilievo
+            let segs = [None, Some(1u8), Some(2), Some(3)].map(|c| {
+                let txt = c.map_or("Nessuna".to_string(), |c| format!("Canale {c}"));
+                let on = c == cur;
+                row().key(format!("edge-{edge}-{c:?}")).role("radio").label(txt.clone()).checked(on).focusable(true).hit()
+                    .h(22.0).px(12.0).center().radius(5.0)
+                    .fill(if on { p.seg_on } else { Color::TRANSPARENT })
+                    .shadow(0.5, 2.0, if on { p.shadow } else { Color::TRANSPARENT })
+                    .motion(motion::SNAPPY)
+                    .on_press(move |s: &mut Gui| s.sh.cfg.lock().unwrap().set_rule(edge, None, c))
+                    .child(text(txt).font(TextStyle::new(12.0, if on { 600.0 } else { 450.0 })).color(p.fg))
+            });
+            card = card.child(row().w_full().gap(6.0).center_y()
+                .child(text(label).w(80.0).font(TextStyle::new(13.0, 450.0)).color(p.fg))
+                .child(row().role("radiogroup").label(label).padding(2.0).gap(2.0).radius(7.0).fill(p.chip).children(segs)));
+            continue;
+        }
         let opts = [None, Some(1u8), Some(2), Some(3)].map(|c| {
             let txt = c.map_or("Nessuna".to_string(), |c| format!("Canale {c}"));
             // "Nessuna" scelta: bordo marcato, l'arancio resta solo per i canali attivi
@@ -338,7 +454,7 @@ fn settings_card(cfg: &Config, p: &Pal) -> El {
     let knob = el().key("knob").size(18.0, 18.0).radius(9.0).fill(Color::WHITE).absolute(if on { 18.0 } else { 2.0 }, 2.0).shadow(1.0, 3.0, p.shadow);
     let switch = el().key("drag-switch").role("switch").label("Ignora mentre trascini").checked(on).focusable(true).hit()
         .size(38.0, 22.0).radius(11.0)
-        .fill(if on { p.ok } else { p.chip }).border(1.0, p.rim)
+        .fill(if on { if p.mac { p.accent } else { p.ok } } else { p.chip }).border(1.0, p.rim)
         .motion(motion::SNAPPY)
         .on_press(|s: &mut Gui| {
             let mut c = s.sh.cfg.lock().unwrap();
